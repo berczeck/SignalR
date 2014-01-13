@@ -17,6 +17,8 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         private volatile bool _drained;
         private readonly int? _maxSize;
         private long _size;
+        private readonly Action<Exception, object> _onError;
+        private readonly object _onErrorState;
 
         public TaskQueue()
             : this(TaskAsyncHelper.Empty)
@@ -24,15 +26,26 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         }
 
         public TaskQueue(Task initialTask)
+            : this(initialTask, null)
         {
-            _lastQueuedTask = initialTask;
         }
 
-        [SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "This is shared code")]        
-        public TaskQueue(Task initialTask, int maxSize)
+        [SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "This is shared code")]
+        public TaskQueue(Task initialTask, int? maxSize)
+            : this(initialTask, maxSize, (ex, state) => { }, null)
+        {
+        }
+
+        public TaskQueue(Task initialTask,
+                         int? maxSize,
+                         Action<Exception, object> onError,
+                         object onErrorState)
         {
             _lastQueuedTask = initialTask;
             _maxSize = maxSize;
+
+            _onError = onError;
+            _onErrorState = onErrorState;
         }
 
 #if !CLIENT_NET45 && !CLIENT_NET4 && !PORTABLE && !NETFX_CORE
@@ -82,24 +95,32 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
 
                 Task newTask = _lastQueuedTask.Then((next, nextState) =>
                 {
-                    return next(nextState).Finally(s =>
+                    try
                     {
-                        var queue = (TaskQueue)s;
-                        if (queue._maxSize != null)
+                        return next(nextState).Finally(s =>
                         {
-                            // Decrement the number of items left in the queue
-                            Interlocked.Decrement(ref queue._size);
+                            var queue = (TaskQueue)s;
+                            if (queue._maxSize != null)
+                            {
+                                // Decrement the number of items left in the queue
+                                Interlocked.Decrement(ref queue._size);
 
 #if !CLIENT_NET45 && !CLIENT_NET4 && !PORTABLE && !NETFX_CORE
-                            var counter = QueueSizeCounter;
-                            if (counter != null)
-                            {
-                                counter.Decrement();
-                            }
+                                var counter = QueueSizeCounter;
+                                if (counter != null)
+                                {
+                                    counter.Decrement();
+                                }
 #endif
-                        }
-                    },
-                    this);
+                            }
+                        },
+                        this);
+                    }
+                    catch (Exception ex)
+                    {
+                        _onError(ex, _onErrorState);
+                        throw;
+                    }
                 },
                 taskFunc, state);
 
